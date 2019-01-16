@@ -17,6 +17,10 @@ import lief
 
 import intervaltree as itree
 
+import numpy as np
+
+import gmpy2
+
 cs_arm = Cs(CS_ARCH_ARM, CS_MODE_ARM)
 cs_arm.detail = True
 cs_thumb = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
@@ -75,6 +79,7 @@ ct_sym = None
 pt_sym = None
 key_sym = None
 iv_sym = None
+hd_list = []
 
 def print_keystuff(uc):
 	key = uc.mem_read(key_sym.value, key_sym.size)
@@ -91,6 +96,7 @@ def dump_regs(regs):
 		print("\t%s:\t0x%08x" % (reg_names[k], regs[k]))
 
 def dump_regs_changed(regs):
+	regs.pop(UC_ARM_REG_PC, None)
 	for k in regs.keys():
 		print("\t%s:\t0x%08x -> 0x%08x" % (reg_names[k], regs[k]['old'], regs[k]['new']))
 
@@ -108,6 +114,23 @@ def changed_regs(old_regs, new_regs):
 			regs[k] = {'old': old_regs[k], 'new': new_regs[k]}
 			# regs[k] = new_regs[k]
 	return regs
+
+def hamming_distance_pair(old_regs, new_regs):
+	pass
+
+def hamming_distance_changed(changed_regs):
+	keys = changed_regs.keys()
+	old = map(lambda r: changed_regs[r]['old'], keys)
+	new = map(lambda r: changed_regs[r]['new'], keys)
+	# print("old: {} new: {}".format(old, new))
+	# xor = np.bitwise_xor(old, new)
+	# print("xor: {}".format(xor))
+	# popcnt = np.bincount(xor.transpose())
+	# print("popcnt: {}".format(popcnt))
+	hd = sum(map(lambda p: gmpy2.hamdist(p[0], p[1]), zip(old, new)))
+	# print("hd: {}".format(hd))
+	return hd
+
 
 def print_insn_detail(insn, insn_bytes):
     # print address, insn bytes, mnemonic and operands
@@ -226,7 +249,8 @@ def hook_code(uc, address, size, user_data):
 	new_regs = all_regs(uc)
 	min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
 	ch_regs = changed_regs(saved_regs, new_regs)
-	ch_regs.pop(UC_ARM_REG_PC, None)
+	# ch_regs.pop(UC_ARM_REG_PC, None)
+	hamming_distance_changed(ch_regs)
 	dump_regs_changed(ch_regs)
 	is_thumb = new_regs[UC_ARM_REG_CPSR] & (1 << 5) != 0
 	mode_str = None
@@ -243,6 +267,16 @@ def hook_code(uc, address, size, user_data):
 	else:
 		insn = list(cs_arm.disasm(insn_bytes, pc))[0]
 	print_insn_detail(insn, insn_bytes)
+	saved_regs = new_regs
+
+def hook_code_hamming_distance(uc, address, size, user_data):
+	global saved_regs, min_sp
+	new_regs = all_regs(uc)
+	min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
+	ch_regs = changed_regs(saved_regs, new_regs)
+	# ch_regs.pop(UC_ARM_REG_PC, None)
+	hd = hamming_distance_changed(ch_regs)
+	hd_list.append(hd)
 	saved_regs = new_regs
 
 def hook_usb_send(uc, address, size, user_data):
@@ -356,6 +390,7 @@ def main(argv):
 
 		# uc.hook_add(UC_HOOK_BLOCK, hook_block)
 		# uc.hook_add(UC_HOOK_CODE, hook_code)
+		uc.hook_add(UC_HOOK_CODE, hook_code_hamming_distance)
 		# uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hook_mem_access)
 		# uc.hook_add(UC_HOOK_MEM_UNMAPPED, hook_mem_unmapped)
 
@@ -372,6 +407,8 @@ def main(argv):
 		uc.emu_start(elf.entrypoint, maxaddr)
 
 		print("Minimum SP: 0x%08x" % min_sp)
+		print("len(hd_list): {}".format(len(hd_list)))
+		np.save('hd.npy', hd_list)
 
 	except UcError as e:
 		print("ERROR: %s" % e)
