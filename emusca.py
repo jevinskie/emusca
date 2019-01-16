@@ -3,8 +3,10 @@
 from __future__ import print_function
 
 import binascii as ba
+import os
 import struct
 import sys
+from multiprocessing import Pool
 
 from unicorn import *
 from unicorn.arm_const import *
@@ -20,6 +22,8 @@ import intervaltree as itree
 import numpy as np
 
 import gmpy2
+
+from deco import concurrent, synchronized
 
 cs_arm = Cs(CS_ARCH_ARM, CS_MODE_ARM)
 cs_arm.detail = True
@@ -46,8 +50,6 @@ def roundup(x, m):
 def rounddown(x, m):
 	return x if x % m == 0 else x - x % m
 
-min_sp = 0xFFFFFFFF
-
 reg_ids = (UC_ARM_REG_APSR, UC_ARM_REG_APSR_NZCV, UC_ARM_REG_CPSR, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_SP, UC_ARM_REG_SPSR, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7, UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11, UC_ARM_REG_R12)
 
 reg_names = {
@@ -73,19 +75,11 @@ reg_names = {
 	UC_ARM_REG_R12: 'R12',
 }
 
-saved_regs = None
-elf = None
-ct_sym = None
-pt_sym = None
-key_sym = None
-iv_sym = None
-hd_list = []
-
 def print_keystuff(uc):
-	key = uc.mem_read(key_sym.value, key_sym.size)
-	iv = uc.mem_read(iv_sym.value, iv_sym.size)
-	ct = uc.mem_read(ct_sym.value, ct_sym.size)
-	pt = uc.mem_read(pt_sym.value, pt_sym.size)
+	key = uc.mem_read(uc.key_sym.value, uc.key_sym.size)
+	iv = uc.mem_read(uc.iv_sym.value, uc.iv_sym.size)
+	ct = uc.mem_read(uc.ct_sym.value, uc.ct_sym.size)
+	pt = uc.mem_read(uc.pt_sym.value, uc.pt_sym.size)
 	print("\tkey: {}".format(ba.hexlify(key)))
 	print("\tiv: {}".format(ba.hexlify(iv)))
 	print("\tct: {}".format(ba.hexlify(ct)))
@@ -245,10 +239,9 @@ def hook_block(uc, address, size, user_data):
 
 # callback for tracing instructions
 def hook_code(uc, address, size, user_data):
-	global saved_regs, min_sp
 	new_regs = all_regs(uc)
-	min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
-	ch_regs = changed_regs(saved_regs, new_regs)
+	uc.min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
+	ch_regs = changed_regs(uc.saved_regs, new_regs)
 	# ch_regs.pop(UC_ARM_REG_PC, None)
 	hamming_distance_changed(ch_regs)
 	dump_regs_changed(ch_regs)
@@ -267,51 +260,22 @@ def hook_code(uc, address, size, user_data):
 	else:
 		insn = list(cs_arm.disasm(insn_bytes, pc))[0]
 	print_insn_detail(insn, insn_bytes)
-	saved_regs = new_regs
+	uc.saved_regs = new_regs
 
 def hook_code_hamming_distance(uc, address, size, user_data):
-	global saved_regs, min_sp
 	new_regs = all_regs(uc)
-	min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
-	ch_regs = changed_regs(saved_regs, new_regs)
+	uc.min_sp = min(uc.min_sp, new_regs[UC_ARM_REG_SP])
+	ch_regs = changed_regs(uc.saved_regs, new_regs)
 	# ch_regs.pop(UC_ARM_REG_PC, None)
 	hd = hamming_distance_changed(ch_regs)
-	hd_list.append(hd)
-	saved_regs = new_regs
-
-def hook_usb_send(uc, address, size, user_data):
-	global saved_regs
-	print(">>> Hooking usb_send")
-	(buf_ptr, size, size_sent_ptr, lr) = uc.reg_read_batch((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_LR))
-	print(">>> \tbuf_ptr: 0x%08x, size: 0x%08x, size_sent_ptr: 0x%08x lr: 0x%08x" % (buf_ptr, size, size_sent_ptr, lr))
-	buf = uc.mem_read(buf_ptr, size)
-	try:
-		buf_str = buf.decode('utf-8')
-		print(">>> \tbuf:\t'%s' %s" % (buf_str, ba.hexlify(buf)))
-	except UnicodeError:
-		print(">>> \tbuf:\t%s" % ba.hexlify(buf))
-	size_sent = struct.pack('<I', size)
-	uc.mem_write(size_sent_ptr, size_sent)
-	new_regs = all_regs(uc)
-	ch_regs = changed_regs(saved_regs, new_regs)
-	ch_regs.pop(UC_ARM_REG_PC, None)
-	dump_regs_changed(ch_regs)
-	saved_regs = new_regs
-	# uc.setdbg()
-	uc.reg_write(UC_ARM_REG_R0, 0)
-	uc.reg_write(UC_ARM_REG_PC, lr)
-
-def hook_NvOsWaitUS(uc, address, size, user_data):
-	print(">>> Hooking NvOsWaitUS")
-	(us, lr) = uc.reg_read_batch((UC_ARM_REG_R0, UC_ARM_REG_LR))
-	print(">>> \tus: %d lr: 0x%08x" % (us, lr))
-	uc.reg_write(UC_ARM_REG_PC, lr)
+	uc.hd_list.append(hd)
+	uc.saved_regs = new_regs
 
 def hook_exit(uc, address, size, user_data):
-	print(">>> Hooking _exit")
+	# print(">>> Hooking _exit")
 	(retval, lr, pc) = uc.reg_read_batch((UC_ARM_REG_R0, UC_ARM_REG_LR, UC_ARM_REG_PC))
-	print(">>> \tretval: %d lr: 0x%08x address: 0x%08X pc: 0x%08x size: %d" % (retval, lr, address, pc, size))
-	print_keystuff(uc)
+	# print(">>> \tretval: %d lr: 0x%08x address: 0x%08X pc: 0x%08x size: %d" % (retval, lr, address, pc, size))
+	# print_keystuff(uc)
 	uc.emu_stop()
 
 # callback for tracing invalid memory access (READ or WRITE)
@@ -345,10 +309,9 @@ def hook_mem_access(uc, access, address, size, value, user_data):
 		print(">>> Memory is being READ at 0x%08x, data size = %u, data value = 0x%08x" \
 				%(address, size, old_val))
 
-def main(argv):
-	global saved_regs, elf, key_sym, iv_sym, ct_sym, pt_sym
-
-	elf = lief.parse(sys.argv[1])
+@concurrent
+def gen_traces(elf_path, key, iv, ct):
+	elf = lief.parse(elf_path)
 	tree = itree.IntervalTree()
 	for seg in elf.segments:
 		rstart = rounddown(seg.virtual_address, 4096)
@@ -357,27 +320,29 @@ def main(argv):
 		rsize_range = rend - rstart
 		zpad_front = b'\x00' * (seg.virtual_address - rstart)
 		zpad_back = b'\x00' * (rend - (seg.virtual_address + seg.virtual_size))
-		print("rstart: 0x{:08x} rend: 0x{:08x} rsize_content: 0x{:08x} rsize_content: 0x{:08x}".format(rstart, rend, rsize_content, rsize_range))
+		# print("rstart: 0x{:08x} rend: 0x{:08x} rsize_content: 0x{:08x} rsize_content: 0x{:08x}".format(rstart, rend, rsize_content, rsize_range))
 		assert(not tree.overlaps(rstart, rend))
 		tree[rstart:rend] = zpad_front + bytes(bytearray(seg.content)) + zpad_back
 	minaddr = tree.begin()
 	maxaddr = tree.end()
-	print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
+	# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
 	stack_gap = 1024*1024
 	stack_size = 1024*1024
 	stack_begin = tree.end() + stack_gap
 	stack_end = stack_begin + stack_size
 	tree[stack_begin:stack_end] = b'\x00' * stack_size
-	stack_top = stack_end - 4
+	stack_top = stack_end
 	# print("tree: {}".format(tree))
 	minaddr = tree.begin()
 	maxaddr = tree.end()
-	print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
+	# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
 
-	print("Emulate thumb code")
+	# print("Emulate thumb code")
 	try:
 		# Initialize emulator in thumb mode
 		uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+		uc.elf = elf
+		uc.min_sp = 0xFFFFFFFF
 
 		for seg in tree:
 			uc.mem_map(seg.begin, seg.end - seg.begin)
@@ -386,7 +351,7 @@ def main(argv):
 		uc.reg_write(UC_ARM_REG_SP, stack_top)
 		uc.reg_write(UC_ARM_REG_APSR, 0xFFFFFFFF) #All application flags turned on
 
-		saved_regs = all_regs(uc)
+		uc.saved_regs = all_regs(uc)
 
 		# uc.hook_add(UC_HOOK_BLOCK, hook_block)
 		# uc.hook_add(UC_HOOK_CODE, hook_code)
@@ -394,24 +359,50 @@ def main(argv):
 		# uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hook_mem_access)
 		# uc.hook_add(UC_HOOK_MEM_UNMAPPED, hook_mem_unmapped)
 
-		key_sym = findsym(elf, 'key')
-		iv_sym = findsym(elf, 'iv')
-		ct_sym = findsym(elf, 'ct')
-		pt_sym = findsym(elf, 'pt')
-		exit_sym = findsym(elf, '_exit')
-		uc.hook_add(UC_HOOK_CODE, hook_exit, begin=exit_sym.value & EVEN_MASK, end=(exit_sym.value & EVEN_MASK) + 2)
+		uc.key_sym = findsym(uc.elf, 'key')
+		uc.iv_sym = findsym(uc.elf, 'iv')
+		uc.ct_sym = findsym(uc.elf, 'ct')
+		uc.pt_sym = findsym(uc.elf, 'pt')
+		uc.exit_sym = findsym(uc.elf, '_exit')
+		uc.hook_add(UC_HOOK_CODE, hook_exit, begin=uc.exit_sym.value & EVEN_MASK, end=(uc.exit_sym.value & EVEN_MASK) + 2)
 
-		print_keystuff(uc)
+		assert(len(key) == 16)
+		assert(len(iv) == 16)
+		assert(len(ct) == 16)
+		# print_keystuff(uc)
+		uc.mem_write(uc.key_sym.value, key)
+		uc.mem_write(uc.iv_sym.value, iv)
+		uc.mem_write(uc.ct_sym.value, ct)
+		# print_keystuff(uc)
+
+		uc.hd_list = []
 
 		# uc.emu_start(RCM_PAYLOAD_ADDR, len(binbuf))
-		uc.emu_start(elf.entrypoint, maxaddr)
+		uc.emu_start(uc.elf.entrypoint, maxaddr)
+		pt = uc.mem_read(uc.pt_sym.value, uc.pt_sym.size)
 
-		print("Minimum SP: 0x%08x" % min_sp)
-		print("len(hd_list): {}".format(len(hd_list)))
-		np.save('hd.npy', hd_list)
+		# print("Minimum SP: 0x%08x" % uc.min_sp)
+		# print("len(hd_list): {}".format(len(uc.hd_list)))
+		return (pt, uc.hd_list)
 
 	except UcError as e:
 		print("ERROR: %s" % e)
+
+def main(argv):
+	key = ba.unhexlify('00112233445566778899aabbccddeeff')
+	iv = b'\x00' * 16
+	res = []
+	for i in range(4):
+		ct = os.urandom(16)
+		print("main ct: {}".format(ba.hexlify(ct)))
+		res.append({'ct': ct, 'res': gen_traces(argv[1], key, iv, ct)})
+	gen_traces.wait()
+	for r in res:
+		ct = r['ct']
+		(pt, hd_list) = r['res'].result()
+		print("main ct: {}".format(ba.hexlify(ct)))
+		print("main pt: {}".format(ba.hexlify(pt)))
+		print("main len(hd_list): {}".format(len(hd_list)))
 
 if __name__ == "__main__":
 	sys.exit(main(sys.argv))
