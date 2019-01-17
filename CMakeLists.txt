@@ -28,8 +28,13 @@ target_link_libraries(aes-dec-test mbedcrypto)
 target_include_directories(aes-dec-test PRIVATE ${CMAKE_SOURCE_DIR}/mbedtls/include)
 target_compile_options(mbedcrypto PRIVATE ${CFLAGS})
 target_compile_options(aes-dec-test PRIVATE ${CFLAGS})
+
+add_executable(aes-sbox-dec-test aes-sbox-dec-test.c tiny-AES-c/aes.c)
+target_include_directories(aes-sbox-dec-test PRIVATE ${CMAKE_SOURCE_DIR}/tiny-AES-c)
+target_compile_options(aes-sbox-dec-test PRIVATE ${CFLAGS})
+
 set_target_properties(
-    aes-dec-test
+    aes-dec-test aes-sbox-dec-test
     PROPERTIES
     C_STANDARD 11
     C_EXTENSIONS ON

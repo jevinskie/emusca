@@ -80,20 +80,20 @@ def print_keystuff(uc):
 	iv = uc.mem_read(uc.iv_sym.value, uc.iv_sym.size)
 	ct = uc.mem_read(uc.ct_sym.value, uc.ct_sym.size)
 	pt = uc.mem_read(uc.pt_sym.value, uc.pt_sym.size)
-	init_key = uc.mem_read(uc.init_key_sym.value, uc.init_key_sym.size)
-	init_iv = uc.mem_read(uc.init_iv_sym.value, uc.init_iv_sym.size)
-	init_ct = uc.mem_read(uc.init_ct_sym.value, uc.init_ct_sym.size)
-	init_pt = uc.mem_read(uc.init_pt_sym.value, uc.init_pt_sym.size)
-	aes_init_done = uc.mem_read(uc.aes_init_done_sym.value, uc.aes_init_done_sym.size)
+	# init_key = uc.mem_read(uc.init_key_sym.value, uc.init_key_sym.size)
+	# init_iv = uc.mem_read(uc.init_iv_sym.value, uc.init_iv_sym.size)
+	# init_ct = uc.mem_read(uc.init_ct_sym.value, uc.init_ct_sym.size)
+	# init_pt = uc.mem_read(uc.init_pt_sym.value, uc.init_pt_sym.size)
+	# aes_init_done = uc.mem_read(uc.aes_init_done_sym.value, uc.aes_init_done_sym.size)
 	print("\tkey: {}".format(ba.hexlify(key)))
 	print("\tiv: {}".format(ba.hexlify(iv)))
 	print("\tct: {}".format(ba.hexlify(ct)))
 	print("\tpt: {}".format(ba.hexlify(pt)))
-	print("\tinit_key: {}".format(ba.hexlify(init_key)))
-	print("\tinit_iv: {}".format(ba.hexlify(init_iv)))
-	print("\tinit_ct: {}".format(ba.hexlify(init_ct)))
-	print("\tinit_pt: {}".format(ba.hexlify(init_pt)))
-	print("\taes_init_done: {}".format(ba.hexlify(aes_init_done)))
+	# print("\tinit_key: {}".format(ba.hexlify(init_key)))
+	# print("\tinit_iv: {}".format(ba.hexlify(init_iv)))
+	# print("\tinit_ct: {}".format(ba.hexlify(init_ct)))
+	# print("\tinit_pt: {}".format(ba.hexlify(init_pt)))
+	# print("\taes_init_done: {}".format(ba.hexlify(aes_init_done)))
 
 def dump_regs(regs):
 	for k in regs.keys():
@@ -378,11 +378,11 @@ def get_inited_uc(elf_path, key, iv, ct):
 			uc.iv_sym = findsym(uc.elf, 'iv')
 			uc.ct_sym = findsym(uc.elf, 'ct')
 			uc.pt_sym = findsym(uc.elf, 'pt')
-			uc.init_key_sym = findsym(uc.elf, 'init_key')
-			uc.init_iv_sym = findsym(uc.elf, 'init_iv')
-			uc.init_ct_sym = findsym(uc.elf, 'init_ct')
-			uc.init_pt_sym = findsym(uc.elf, 'init_pt')
-			uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
+			# uc.init_key_sym = findsym(uc.elf, 'init_key')
+			# uc.init_iv_sym = findsym(uc.elf, 'init_iv')
+			# uc.init_ct_sym = findsym(uc.elf, 'init_ct')
+			# uc.init_pt_sym = findsym(uc.elf, 'init_pt')
+			# uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
 			uc.exit_sym = findsym(uc.elf, '_exit')
 
 			aes_init_marker_sym = findsym(uc.elf, 'aes_init_marker')
@@ -421,12 +421,12 @@ def get_inited_uc(elf_path, key, iv, ct):
 	uc.iv_sym = findsym(uc.elf, 'iv')
 	uc.ct_sym = findsym(uc.elf, 'ct')
 	uc.pt_sym = findsym(uc.elf, 'pt')
-	uc.init_key_sym = findsym(uc.elf, 'init_key')
-	uc.init_iv_sym = findsym(uc.elf, 'init_iv')
-	uc.init_ct_sym = findsym(uc.elf, 'init_ct')
-	uc.init_pt_sym = findsym(uc.elf, 'init_pt')
+	# uc.init_key_sym = findsym(uc.elf, 'init_key')
+	# uc.init_iv_sym = findsym(uc.elf, 'init_iv')
+	# uc.init_ct_sym = findsym(uc.elf, 'init_ct')
+	# uc.init_pt_sym = findsym(uc.elf, 'init_pt')
+	# uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
 	uc.exit_sym = findsym(uc.elf, '_exit')
-	uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
 	uc.aes_round_marker_sym = findsym(uc.elf, 'aes_round_marker')
 	uc.aes_round_marker_addr = uc.aes_round_marker_sym.value & EVEN_MASK
 	uc.aes_round_marks = []
@@ -506,7 +506,7 @@ def main(argv):
 	# key = b'\x00' * 16
 	iv = b'\x00' * 16
 	res = []
-	for i in range(2048):
+	for i in range(10):
 		ct = os.urandom(16)
 		# ct = b'\x00' * 16
 		# print("main ct: {}".format(ba.hexlify(ct)))
