@@ -1,6 +1,8 @@
 [submodule "mbedtls"]
 	path = mbedtls
-	url = https://github.com/ARMmbed/mbedtls
+	branch = emusca
+	url = https://github.com/jevinskie/mbedtls
 [submodule "tiny-AES-c"]
 	path = tiny-AES-c
-	url = https://github.com/kokke/tiny-AES-c
+	branch = emusca
+	url = https://github.com/jevinskie/tiny-AES-c
