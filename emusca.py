@@ -459,7 +459,7 @@ def gen_traces(elf_path, key, iv, ct):
 	except UcError as e:
 		print("ERROR: %s" % e)
 
-def write_daredevil(cts, pts, hd_lists):
+def write_daredevil(key, cts, pts, hd_lists):
 	prefix = 'foo'
 	with open(prefix + '_in_daredevil.bin', 'wb') as in_f, open(prefix + '_out_daredevil.bin', 'wb') as out_f, open(prefix + '_trace_daredevil.bin', 'wb') as trace_f:
 		for i in range(len(cts)):
@@ -472,33 +472,33 @@ def write_daredevil(cts, pts, hd_lists):
 	with open(prefix + '_daredevil.cfg', 'w') as cfgf:
 		cfgf.write(
 	"""
-	[Traces]
-	files=1
-	trace_type={format}
-	transpose=true
-	index=0
-	nsamples={nsamples}
-	trace={traces_filename} {ntraces} {nsamples}
+[Traces]
+files=1
+trace_type={format}
+transpose=true
+index=0
+nsamples={nsamples}
+trace={traces_filename} {ntraces} {nsamples}
 
-	[Guesses]
-	files=1
-	guess_type=u
-	transpose=true
-	guess={input_filename} {ntraces} 16
+[Guesses]
+files=1
+guess_type=u
+transpose=true
+guess={input_filename} {ntraces} 16
 
-	[General]
-	threads=8
-	order=1
-	return_type=double
-	algorithm=AES
-	position=LUT/AES_AFTER_SBOX
-	round=0
-	bitnum=none
-	bytenum=0
-	correct_key=0x2b7e151628aed2a6abf7158809cf4f3c
-	memory=4G
-	top=20
-	""".format(format='f', ntraces=len(hd_lists), nsamples=len(hd_lists[0]), traces_filename=os.getcwd() + '/' + prefix + '_trace_daredevil.bin', input_filename=os.getcwd() + '/' + prefix + '_in_daredevil.bin'))
+[General]
+threads=8
+order=1
+return_type=double
+algorithm=AES
+position=LUT/AES_AFTER_SBOXINV
+round=0
+bitnum=none
+bytenum=all
+correct_key=0x{key}
+memory=4G
+top=20
+	""".format(format='f', ntraces=len(hd_lists), nsamples=len(hd_lists[0]), traces_filename=os.getcwd() + '/' + prefix + '_trace_daredevil.bin', input_filename=os.getcwd() + '/' + prefix + '_in_daredevil.bin', key=ba.hexlify(key)))
 
 def main(argv):
 	get_inited_uc(argv[1], b'\x00' * 16, b'\x00' * 16, b'\x00' * 16) # cache init
@@ -506,7 +506,7 @@ def main(argv):
 	# key = b'\x00' * 16
 	iv = b'\x00' * 16
 	res = []
-	for i in range(1024):
+	for i in range(4096):
 		ct = os.urandom(16)
 		# ct = b'\x00' * 16
 		# print("main ct: {}".format(ba.hexlify(ct)))
@@ -523,7 +523,8 @@ def main(argv):
 		pts.append(pt)
 		round_marks.append(aes_round_marks)
 		hd_lists.append(hd_list)
-	write_daredevil(cts, pts, hd_lists)
+		# np.save('foo.npy', hd_list)
+	write_daredevil(key, cts, pts, hd_lists)
 	print("round_marks: {}".format(round_marks[0]))
 	last = 0
 	diffs = []
