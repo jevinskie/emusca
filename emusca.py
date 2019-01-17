@@ -80,10 +80,20 @@ def print_keystuff(uc):
 	iv = uc.mem_read(uc.iv_sym.value, uc.iv_sym.size)
 	ct = uc.mem_read(uc.ct_sym.value, uc.ct_sym.size)
 	pt = uc.mem_read(uc.pt_sym.value, uc.pt_sym.size)
+	init_key = uc.mem_read(uc.init_key_sym.value, uc.init_key_sym.size)
+	init_iv = uc.mem_read(uc.init_iv_sym.value, uc.init_iv_sym.size)
+	init_ct = uc.mem_read(uc.init_ct_sym.value, uc.init_ct_sym.size)
+	init_pt = uc.mem_read(uc.init_pt_sym.value, uc.init_pt_sym.size)
+	aes_init_done = uc.mem_read(uc.aes_init_done_sym.value, uc.aes_init_done_sym.size)
 	print("\tkey: {}".format(ba.hexlify(key)))
 	print("\tiv: {}".format(ba.hexlify(iv)))
 	print("\tct: {}".format(ba.hexlify(ct)))
 	print("\tpt: {}".format(ba.hexlify(pt)))
+	print("\tinit_key: {}".format(ba.hexlify(init_key)))
+	print("\tinit_iv: {}".format(ba.hexlify(init_iv)))
+	print("\tinit_ct: {}".format(ba.hexlify(init_ct)))
+	print("\tinit_pt: {}".format(ba.hexlify(init_pt)))
+	print("\taes_init_done: {}".format(ba.hexlify(aes_init_done)))
 
 def dump_regs(regs):
 	for k in regs.keys():
@@ -240,7 +250,6 @@ def hook_block(uc, address, size, user_data):
 # callback for tracing instructions
 def hook_code(uc, address, size, user_data):
 	new_regs = all_regs(uc)
-	uc.min_sp = min(min_sp, new_regs[UC_ARM_REG_SP])
 	ch_regs = changed_regs(uc.saved_regs, new_regs)
 	# ch_regs.pop(UC_ARM_REG_PC, None)
 	hamming_distance_changed(ch_regs)
@@ -264,12 +273,14 @@ def hook_code(uc, address, size, user_data):
 
 def hook_code_hamming_distance(uc, address, size, user_data):
 	new_regs = all_regs(uc)
-	uc.min_sp = min(uc.min_sp, new_regs[UC_ARM_REG_SP])
 	ch_regs = changed_regs(uc.saved_regs, new_regs)
 	# ch_regs.pop(UC_ARM_REG_PC, None)
 	hd = hamming_distance_changed(ch_regs)
+	if address == uc.aes_round_marker_addr:
+		uc.aes_round_marks.append(uc.insn_count)
 	uc.hd_list.append(hd)
 	uc.saved_regs = new_regs
+	uc.insn_count += 1
 
 def hook_exit(uc, address, size, user_data):
 	# print(">>> Hooking _exit")
@@ -309,100 +320,217 @@ def hook_mem_access(uc, access, address, size, value, user_data):
 		print(">>> Memory is being READ at 0x%08x, data size = %u, data value = 0x%08x" \
 				%(address, size, old_val))
 
+
+uc_inited_ctx = None
+uc_elf = None
+uc_stack_top = None
+uc_maxaddr = None
+def get_inited_uc(elf_path, key, iv, ct):
+	global uc_inited_ctx, uc_elf, uc_stack_top, uc_maxaddr
+	if uc_inited_ctx is None:
+		elf = lief.parse(elf_path)
+		uc_elf = elf
+		tree = itree.IntervalTree()
+		for seg in elf.segments:
+			rstart = rounddown(seg.virtual_address, 4096)
+			rend = roundup(seg.virtual_address + seg.virtual_size, 4096)
+			rsize_content = roundup(seg.virtual_size, 4096)
+			rsize_range = rend - rstart
+			zpad_front = b'\x00' * (seg.virtual_address - rstart)
+			zpad_back = b'\x00' * (rend - (seg.virtual_address + seg.virtual_size))
+			# print("rstart: 0x{:08x} rend: 0x{:08x} rsize_content: 0x{:08x} rsize_content: 0x{:08x}".format(rstart, rend, rsize_content, rsize_range))
+			assert(not tree.overlaps(rstart, rend))
+			tree[rstart:rend] = zpad_front + bytes(bytearray(seg.content)) + zpad_back
+		minaddr = tree.begin()
+		maxaddr = tree.end()
+		uc_maxaddr = maxaddr
+		# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
+		stack_gap = 1024*1024
+		stack_size = 1024*1024
+		stack_begin = tree.end() + stack_gap
+		stack_end = stack_begin + stack_size
+		tree[stack_begin:stack_end] = b'\x00' * stack_size
+		stack_top = stack_end
+		uc_stack_top = stack_top
+		# print("tree: {}".format(tree))
+		minaddr = tree.begin()
+		maxaddr = tree.end()
+		# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
+
+		# print("Emulate thumb code")
+		try:
+			# Initialize emulator in thumb mode
+			uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+			uc.elf = elf
+			uc.maxaddr = maxaddr
+
+			for seg in tree:
+				uc.mem_map(seg.begin, seg.end - seg.begin)
+				uc.mem_write(seg.begin, seg.data)
+
+			uc.reg_write(UC_ARM_REG_SP, stack_top)
+			uc.reg_write(UC_ARM_REG_APSR, 0xFFFFFFFF) #All application flags turned on
+
+			def hook_aes_init_marker(uc, address, size, user_data):
+				uc.emu_stop()
+
+			uc.key_sym = findsym(uc.elf, 'key')
+			uc.iv_sym = findsym(uc.elf, 'iv')
+			uc.ct_sym = findsym(uc.elf, 'ct')
+			uc.pt_sym = findsym(uc.elf, 'pt')
+			uc.init_key_sym = findsym(uc.elf, 'init_key')
+			uc.init_iv_sym = findsym(uc.elf, 'init_iv')
+			uc.init_ct_sym = findsym(uc.elf, 'init_ct')
+			uc.init_pt_sym = findsym(uc.elf, 'init_pt')
+			uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
+			uc.exit_sym = findsym(uc.elf, '_exit')
+
+			aes_init_marker_sym = findsym(uc.elf, 'aes_init_marker')
+			aes_init_marker_addr = aes_init_marker_sym.value & EVEN_MASK
+
+			uc.hook_add(UC_HOOK_CODE, hook_aes_init_marker, begin=aes_init_marker_addr & EVEN_MASK, end=aes_init_marker_addr + 2)
+
+			# print_keystuff(uc)
+			uc.emu_start(uc.elf.entrypoint, uc.maxaddr)
+			# print_keystuff(uc)
+			mem_ctx = []
+			for region in uc.mem_regions():
+				mem_ctx.append({'addr': region[0], 'sz': region[1] - region[0] + 1, 'data': bytes(uc.mem_read(region[0], region[1] - region[0] + 1))})
+			uc_inited_ctx = mem_ctx
+		except UcError as e:
+			print("ERROR: %s" % e)
+
+	elf = uc_elf
+	uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
+	uc.elf = elf
+	uc.insn_count = 0
+	uc.maxaddr = uc_maxaddr
+
+	for seg in uc_inited_ctx:
+		uc.mem_map(seg['addr'], seg['sz'])
+		uc.mem_write(seg['addr'], seg['data'])
+
+	uc.reg_write(UC_ARM_REG_SP, uc_stack_top)
+	uc.reg_write(UC_ARM_REG_APSR, 0xFFFFFFFF) #All application flags turned on
+
+	uc.saved_regs = all_regs(uc)
+
+	uc.hook_add(UC_HOOK_CODE, hook_code_hamming_distance)
+
+	uc.key_sym = findsym(uc.elf, 'key')
+	uc.iv_sym = findsym(uc.elf, 'iv')
+	uc.ct_sym = findsym(uc.elf, 'ct')
+	uc.pt_sym = findsym(uc.elf, 'pt')
+	uc.init_key_sym = findsym(uc.elf, 'init_key')
+	uc.init_iv_sym = findsym(uc.elf, 'init_iv')
+	uc.init_ct_sym = findsym(uc.elf, 'init_ct')
+	uc.init_pt_sym = findsym(uc.elf, 'init_pt')
+	uc.exit_sym = findsym(uc.elf, '_exit')
+	uc.aes_init_done_sym = findsym(uc.elf, 'aes_init_done')
+	uc.aes_round_marker_sym = findsym(uc.elf, 'aes_round_marker')
+	uc.aes_round_marker_addr = uc.aes_round_marker_sym.value & EVEN_MASK
+	uc.aes_round_marks = []
+	uc.hook_add(UC_HOOK_CODE, hook_exit, begin=uc.exit_sym.value & EVEN_MASK, end=(uc.exit_sym.value & EVEN_MASK) + 2)
+
+	assert(len(key) == 16)
+	assert(len(iv) == 16)
+	assert(len(ct) == 16)
+	# print_keystuff(uc)
+	uc.mem_write(uc.key_sym.value, key)
+	uc.mem_write(uc.iv_sym.value, iv)
+	uc.mem_write(uc.ct_sym.value, ct)
+	# print_keystuff(uc)
+
+	uc.hd_list = []
+	return uc
+
 @concurrent
 def gen_traces(elf_path, key, iv, ct):
-	elf = lief.parse(elf_path)
-	tree = itree.IntervalTree()
-	for seg in elf.segments:
-		rstart = rounddown(seg.virtual_address, 4096)
-		rend = roundup(seg.virtual_address + seg.virtual_size, 4096)
-		rsize_content = roundup(seg.virtual_size, 4096)
-		rsize_range = rend - rstart
-		zpad_front = b'\x00' * (seg.virtual_address - rstart)
-		zpad_back = b'\x00' * (rend - (seg.virtual_address + seg.virtual_size))
-		# print("rstart: 0x{:08x} rend: 0x{:08x} rsize_content: 0x{:08x} rsize_content: 0x{:08x}".format(rstart, rend, rsize_content, rsize_range))
-		assert(not tree.overlaps(rstart, rend))
-		tree[rstart:rend] = zpad_front + bytes(bytearray(seg.content)) + zpad_back
-	minaddr = tree.begin()
-	maxaddr = tree.end()
-	# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
-	stack_gap = 1024*1024
-	stack_size = 1024*1024
-	stack_begin = tree.end() + stack_gap
-	stack_end = stack_begin + stack_size
-	tree[stack_begin:stack_end] = b'\x00' * stack_size
-	stack_top = stack_end
-	# print("tree: {}".format(tree))
-	minaddr = tree.begin()
-	maxaddr = tree.end()
-	# print("minaddr: 0x{:08x} maxaddr: 0x{:08x}".format(minaddr, maxaddr))
-
-	# print("Emulate thumb code")
 	try:
-		# Initialize emulator in thumb mode
-		uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB)
-		uc.elf = elf
-		uc.min_sp = 0xFFFFFFFF
-
-		for seg in tree:
-			uc.mem_map(seg.begin, seg.end - seg.begin)
-			uc.mem_write(seg.begin, seg.data)
-
-		uc.reg_write(UC_ARM_REG_SP, stack_top)
-		uc.reg_write(UC_ARM_REG_APSR, 0xFFFFFFFF) #All application flags turned on
-
-		uc.saved_regs = all_regs(uc)
-
-		# uc.hook_add(UC_HOOK_BLOCK, hook_block)
-		# uc.hook_add(UC_HOOK_CODE, hook_code)
-		uc.hook_add(UC_HOOK_CODE, hook_code_hamming_distance)
-		# uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hook_mem_access)
-		# uc.hook_add(UC_HOOK_MEM_UNMAPPED, hook_mem_unmapped)
-
-		uc.key_sym = findsym(uc.elf, 'key')
-		uc.iv_sym = findsym(uc.elf, 'iv')
-		uc.ct_sym = findsym(uc.elf, 'ct')
-		uc.pt_sym = findsym(uc.elf, 'pt')
-		uc.exit_sym = findsym(uc.elf, '_exit')
-		uc.hook_add(UC_HOOK_CODE, hook_exit, begin=uc.exit_sym.value & EVEN_MASK, end=(uc.exit_sym.value & EVEN_MASK) + 2)
-
-		assert(len(key) == 16)
-		assert(len(iv) == 16)
-		assert(len(ct) == 16)
-		# print_keystuff(uc)
-		uc.mem_write(uc.key_sym.value, key)
-		uc.mem_write(uc.iv_sym.value, iv)
-		uc.mem_write(uc.ct_sym.value, ct)
-		# print_keystuff(uc)
-
-		uc.hd_list = []
-
-		# uc.emu_start(RCM_PAYLOAD_ADDR, len(binbuf))
-		uc.emu_start(uc.elf.entrypoint, maxaddr)
+		uc = get_inited_uc(elf_path, key, iv, ct)
+		uc.emu_start(uc.elf.entrypoint, uc.maxaddr)
 		pt = uc.mem_read(uc.pt_sym.value, uc.pt_sym.size)
-
-		# print("Minimum SP: 0x%08x" % uc.min_sp)
+		uc.hd_list = np.asarray(uc.hd_list, dtype=np.dtype(np.uint16))
+		# print_keystuff(uc)
+		# print("pt: {}".format(ba.hexlify(pt)))
 		# print("len(hd_list): {}".format(len(uc.hd_list)))
-		return (pt, uc.hd_list)
+		return (pt, uc.aes_round_marks, uc.hd_list)
 
 	except UcError as e:
 		print("ERROR: %s" % e)
 
+def write_daredevil(cts, pts, hd_lists):
+	prefix = 'foo'
+	with open(prefix + '_in_daredevil.bin', 'wb') as in_f, open(prefix + '_out_daredevil.bin', 'wb') as out_f, open(prefix + '_trace_daredevil.bin', 'wb') as trace_f:
+		for i in range(len(cts)):
+			indata = cts[i]
+			outdata = pts[i]
+			tracedata = struct.pack("={}f".format(len(hd_lists[i])), *hd_lists[i])
+			in_f.write(indata)
+			out_f.write(outdata)
+			trace_f.write(tracedata)
+	with open(prefix + '_daredevil.cfg', 'w') as cfgf:
+		cfgf.write(
+	"""
+	[Traces]
+	files=1
+	trace_type={format}
+	transpose=true
+	index=0
+	nsamples={nsamples}
+	trace={traces_filename} {ntraces} {nsamples}
+
+	[Guesses]
+	files=1
+	guess_type=u
+	transpose=true
+	guess={input_filename} {ntraces} 16
+
+	[General]
+	threads=8
+	order=1
+	return_type=double
+	algorithm=AES
+	position=LUT/AES_AFTER_SBOX
+	round=0
+	bitnum=none
+	bytenum=0
+	correct_key=0x2b7e151628aed2a6abf7158809cf4f3c
+	memory=4G
+	top=20
+	""".format(format='f', ntraces=len(hd_lists), nsamples=len(hd_lists[0]), traces_filename=os.getcwd() + '/' + prefix + '_trace_daredevil.bin', input_filename=os.getcwd() + '/' + prefix + '_in_daredevil.bin'))
+
 def main(argv):
+	get_inited_uc(argv[1], b'\x00' * 16, b'\x00' * 16, b'\x00' * 16) # cache init
 	key = ba.unhexlify('00112233445566778899aabbccddeeff')
+	# key = b'\x00' * 16
 	iv = b'\x00' * 16
 	res = []
-	for i in range(4):
+	for i in range(2048):
 		ct = os.urandom(16)
-		print("main ct: {}".format(ba.hexlify(ct)))
+		# ct = b'\x00' * 16
+		# print("main ct: {}".format(ba.hexlify(ct)))
 		res.append({'ct': ct, 'res': gen_traces(argv[1], key, iv, ct)})
 	gen_traces.wait()
+	cts = []
+	pts = []
+	hd_lists = []
+	round_marks = []
 	for r in res:
 		ct = r['ct']
-		(pt, hd_list) = r['res'].result()
-		print("main ct: {}".format(ba.hexlify(ct)))
-		print("main pt: {}".format(ba.hexlify(pt)))
-		print("main len(hd_list): {}".format(len(hd_list)))
+		(pt, aes_round_marks, hd_list) = r['res'].result()
+		cts.append(ct)
+		pts.append(pt)
+		round_marks.append(aes_round_marks)
+		hd_lists.append(hd_list)
+	write_daredevil(cts, pts, hd_lists)
+	print("round_marks: {}".format(round_marks[0]))
+	last = 0
+	diffs = []
+	for n in round_marks[0]:
+		diffs.append(n - last)
+		last = n
+	print("diffs: {}".format(diffs))
 
 if __name__ == "__main__":
 	sys.exit(main(sys.argv))

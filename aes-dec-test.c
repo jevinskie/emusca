@@ -23,6 +23,11 @@ uint8_t iv[0x10];
 uint8_t ct[0x10];
 uint8_t pt[0x10];
 
+uint8_t init_key[0x10];
+uint8_t init_iv[0x10];
+uint8_t init_ct[0x10];
+uint8_t init_pt[0x10];
+
 void aes_do_dec(const uint8_t *key_in, size_t key_sz, uint8_t *iv_in, const uint8_t *ct_in, uint8_t *pt_out, size_t sz_in) {
 	mbedtls_aes_context ctx;
 	mbedtls_aes_setkey_dec(&ctx, key_in, key_sz*8);
@@ -30,9 +35,23 @@ void aes_do_dec(const uint8_t *key_in, size_t key_sz, uint8_t *iv_in, const uint
 	return;
 }
 
+__attribute__((noinline))
+void aes_init_marker(void) {
+    asm volatile("nop\n\t");
+    return;
+}
+
 void aes_do_dec_wrapped(void) {
+	static int done_init = 0;
+	if (!done_init) {
+		aes_do_dec(init_key, sizeof(init_key), init_iv, init_ct, init_pt, sizeof(init_ct));
+		done_init = 1;
+		aes_init_marker();
+	}
 	aes_do_dec(key, sizeof(key), iv, ct, pt, sizeof(ct));
+#ifdef __arm__
 	_exit(243);
+#endif
 }
 
 int main(int argc, const char **argv) {
@@ -44,7 +63,8 @@ int main(int argc, const char **argv) {
 	read_hex(argv[1], key, sizeof(key));
 	read_hex(argv[2], iv, sizeof(iv));
 	read_hex(argv[3], ct, sizeof(pt));
-	aes_do_dec(key, sizeof(key), iv, ct, pt, sizeof(ct));
+	// aes_do_dec(key, sizeof(key), iv, ct, pt, sizeof(ct));
+	aes_do_dec_wrapped();
 	print_hex(pt, sizeof(pt));
 	puts("");
 	return 0;
