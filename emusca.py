@@ -506,7 +506,7 @@ def main(argv):
 	# key = b'\x00' * 16
 	iv = b'\x00' * 16
 	res = []
-	for i in range(10):
+	for i in range(1024):
 		ct = os.urandom(16)
 		# ct = b'\x00' * 16
 		# print("main ct: {}".format(ba.hexlify(ct)))
